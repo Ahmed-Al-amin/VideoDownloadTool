@@ -40,8 +40,8 @@ pip install yt-dlp
 Clone the repo and run the script directly — no extra dependencies required, it only uses the Python standard library.
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/Ahmed-Al-amin/VideoDownloadTool.git
+cd VideoDownloadTool
 python yt_dlp_manager.py
 ```
 
