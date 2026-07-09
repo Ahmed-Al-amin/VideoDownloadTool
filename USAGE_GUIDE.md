@@ -122,6 +122,15 @@ New directory path: ~/Videos
 
 Required for downloading private, age-restricted, login-gated, or subscriber-only content.
 
+#### How to obtain cookies
+1. **Method A (Recommended):** Log in to the website you want to download from, then install a browser extension like **"Get cookies.txt LOCALLY"**. Use it to export your cookies as a `.txt` file.
+2. **Method B (Manual):** If Method A is not possible, you can manually copy your browser cookies. In your terminal, run:
+   ```bash
+   echo "PASTE_YOUR_COPIES_HERE" > cookies.txt
+   ```
+   This will create a `cookies.txt` file in your current folder.
+
+#### Using cookies in the tool
 ```
 Enter a URL (or command): c
 No cookies file set.
@@ -129,7 +138,7 @@ Enter path to cookies .txt file: ~/cookies.txt
   ✔ Cookies set: /home/user/cookies.txt
 ```
 
-- The cookies file must be in Netscape cookies format (usually exported via browser extensions like "Get cookies.txt LOCALLY" on Chrome/Firefox).
+- The cookies file must be in Netscape cookies format.
 - To clear an existing cookies file, run `c` again and press Enter without typing a path:
 
 ```
