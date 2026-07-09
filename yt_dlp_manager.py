@@ -9,6 +9,7 @@ import subprocess
 import threading
 import sys
 import os
+import re
 import signal
 import shutil
 from datetime import datetime
@@ -19,42 +20,100 @@ G   = "\033[1;32m"   # green
 Y   = "\033[1;33m"   # yellow
 B   = "\033[1;34m"   # blue
 C   = "\033[1;36m"   # cyan
+M   = "\033[1;35m"   # magenta
 W   = "\033[1;37m"   # white
 DIM = "\033[2m"
 RST = "\033[0m"
 
 # ── Config ───────────────────────────────────────────────────────────────────
-DOWNLOAD_DIR  = os.path.expanduser("~/Downloads/yt-dlp")
-YT_DLP_BINARY = "yt-dlp"          # make sure yt-dlp is in your PATH
-PLAYLIST_MODE = False              # start in single-video mode
-COOKIES_FILE  = ""                 # path to cookies .txt file, empty = not set
+DOWNLOAD_DIR    = os.path.expanduser("~/Downloads/yt-dlp")
+YT_DLP_BINARY   = "yt-dlp"          # make sure yt-dlp is in your PATH
+PLAYLIST_MODE   = False              # start in single-video mode
+BYPASS_MODE     = False              # use --impersonate and -4 for blocked videos
+COOKIES_FILE    = ""                 # path to cookies .txt file, empty = not set
+STAGING_DIRNAME = ".activedownloads" # hidden folder used while a file is downloading
 
 # Base yt-dlp flags (output path and playlist flag are added dynamically)
 YT_DLP_BASE_ARGS = [
     "--embed-thumbnail",
     "--add-metadata",
     "-f", "bestvideo+bestaudio/best",
+    "--newline",   # forces one progress line per update instead of \r overwrites
 ]
 
+# ── Progress-line parsing ────────────────────────────────────────────────────
+DEST_RE       = re.compile(r'\[download\]\s+Destination:\s+(.+)')
+ALREADY_RE    = re.compile(r'\[download\]\s+(.+?)\s+has already been downloaded')
+PROGRESS_RE   = re.compile(
+    r'\[download\]\s+(?P<percent>[\d.]+)%'
+    r'(?:\s+of\s+~?\s*(?P<size>[\d.]+\S*))?'
+    r'(?:\s+at\s+(?P<speed>[\d.]+\S*|Unknown speed))?'
+    r'(?:\s+ETA\s+(?P<eta>\S+))?'
+)
+MERGER_RE     = re.compile(r'\[Merger\]\s+Merging formats into "(.+)"')
 
-def build_args() -> list[str]:
-    """Return yt-dlp args with current DOWNLOAD_DIR and playlist mode baked in."""
-    if PLAYLIST_MODE:
-        # Each playlist gets its own subdirectory named after the playlist
-        template = os.path.join(DOWNLOAD_DIR, "%(playlist_title)s", "%(title)s.%(ext)s")
+
+def build_args(job_id: int, playlist_mode: bool, bypass_mode: bool, download_dir: str):
+    """Return (yt-dlp args, staging_root) for this job.
+
+    Every job gets its own staging subfolder (hidden, per-job) so concurrent
+    downloads never collide, and so a job's files can be cleanly identified
+    and moved to their final destination once yt-dlp is completely done with
+    them (post-processing, thumbnail embedding, metadata, etc.).
+    """
+    staging_root = os.path.join(download_dir, STAGING_DIRNAME, f"job_{job_id}")
+
+    if playlist_mode:
+        # Each playlist gets its own subdirectory named after the playlist,
+        # staged under the hidden folder first.
+        template = os.path.join(staging_root, "%(playlist_title)s", "%(title)s.%(ext)s")
         playlist_flag = []
     else:
         # Flat — single video, no subdirectory
-        template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+        template = os.path.join(staging_root, "%(title)s.%(ext)s")
         playlist_flag = ["--no-playlist"]
+
     cookies_flag = ["--cookies", COOKIES_FILE] if COOKIES_FILE else []
-    return YT_DLP_BASE_ARGS + playlist_flag + cookies_flag + ["-o", template]
+
+    # Bypass Flags
+    bypass_flags = ["--impersonate", "chrome", "--rm-cache-dir", "-4"] if bypass_mode else []
+
+    args = YT_DLP_BASE_ARGS + playlist_flag + cookies_flag + bypass_flags + ["-o", template]
+    return args, staging_root
+
+
+def move_finished_files(staging_root: str, download_dir: str, label: str) -> int:
+    """Move every fully-downloaded file out of the hidden staging folder into
+    the real download folder, preserving playlist subfolder structure.
+    Returns the number of files moved."""
+    if not os.path.isdir(staging_root):
+        return 0
+
+    moved = 0
+    for root, _dirs, files in os.walk(staging_root):
+        for fname in files:
+            src = os.path.join(root, fname)
+            rel = os.path.relpath(src, staging_root)
+            dst = os.path.join(download_dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                if os.path.exists(dst):
+                    os.remove(dst)
+                shutil.move(src, dst)
+                moved += 1
+            except Exception as exc:
+                print(f"  {R}⚠ {label} could not move '{fname}': {exc}{RST}")
+
+    # Clean up this job's now-empty staging tree
+    shutil.rmtree(staging_root, ignore_errors=True)
+    return moved
 
 
 # ── State (thread-safe) ──────────────────────────────────────────────────────
 lock        = threading.Lock()
 active_jobs: dict[str, threading.Thread] = {}   # url → thread
 job_counter = 0
+job_progress: dict[int, dict] = {}              # job_id → {title, percent, speed, eta, url}
 
 
 def ts() -> str:
@@ -62,46 +121,141 @@ def ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def print_status():
-    """Print how many downloads are currently running."""
+def print_status(show_progress: bool = False):
+    """Print how many downloads are currently running and active modes.
+
+    Per-job progress (name + %) is only included when show_progress=True,
+    i.e. when the user explicitly presses 's'. Automatic status prints
+    (on job start/finish) stay to the plain summary line."""
     with lock:
         n = len(active_jobs)
+        progress_snapshot = dict(job_progress) if show_progress else {}
+
     mode     = f"{G}PLAYLIST{RST}"    if PLAYLIST_MODE else f"{C}SINGLE VIDEO{RST}"
+    bypass   = f"{M}ON{RST}"          if BYPASS_MODE   else f"{DIM}OFF{RST}"
     cookies  = f"{G}SET{RST} {DIM}({COOKIES_FILE}){RST}" if COOKIES_FILE else f"{Y}NOT SET{RST}"
-    if n == 0:
-        print(f"  {DIM}[{ts()}] No active downloads.{RST}  Mode: {mode}  Cookies: {cookies}")
-    else:
-        print(f"  {C}[{ts()}] Active downloads: {n}{RST}  Mode: {mode}  Cookies: {cookies}")
+
+    status_line = (
+        f"  {DIM}[{ts()}] {RST}"
+        f"Active: {C}{n}{RST}  "
+        f"Mode: {mode}  "
+        f"Bypass: {bypass}  "
+        f"Cookies: {cookies}"
+    )
+    print(status_line)
+
+    if not show_progress:
+        return
+
+    if not progress_snapshot:
+        if n:
+            print(f"    {DIM}(no progress data yet — downloads still starting up){RST}")
+        return
+
+    for job_id in sorted(progress_snapshot):
+        info = progress_snapshot[job_id]
+        title = info.get("title") or info.get("url", "?")
+        percent = info.get("percent")
+        speed = info.get("speed") or "?"
+        eta = info.get("eta") or "?"
+        if percent is None:
+            print(f"    {C}#{job_id}{RST} {DIM}starting…{RST}  {W}{title}{RST}")
+        else:
+            print(
+                f"    {C}#{job_id}{RST} "
+                f"{Y}{percent:5.1f}%{RST} "
+                f"{DIM}{speed} ETA {eta}{RST}  "
+                f"{W}{title}{RST}"
+            )
 
 
-def run_download(url: str, job_id: int, playlist_mode: bool):
-    """Run yt-dlp for *url* in a background thread."""
+def run_download(url: str, job_id: int, playlist_mode: bool, bypass_mode: bool, download_dir: str):
+    """Run yt-dlp for *url* in a background thread, staging output in a hidden
+    folder and moving finished files into the real folder afterwards."""
     label = f"#{job_id}"
     mode_tag = f"{G}[PLAYLIST]{RST}" if playlist_mode else f"{C}[SINGLE]{RST}"
+    bypass_tag = f" {M}[BYPASS]{RST}" if bypass_mode else ""
 
-    print(f"\n{G}[{ts()}] {label} STARTED {mode_tag}  {DIM}{url}{RST}")
+    print(f"\n{G}[{ts()}] {label} STARTED {mode_tag}{bypass_tag}  {DIM}{url}{RST}")
     print_status()
 
-    # Snapshot the args at the moment the download starts
-    cmd = [YT_DLP_BINARY] + build_args() + [url]
+    args, staging_root = build_args(job_id, playlist_mode, bypass_mode, download_dir)
+    cmd = [YT_DLP_BINARY] + args + [url]
+
+    output_lines: list[str] = []
+    current_title = url
+    last_percent  = -1.0
+
+    with lock:
+        job_progress[job_id] = {"title": url, "percent": None, "speed": None, "eta": None, "url": url}
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            bufsize=1,
         )
 
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            output_lines.append(line)
+
+            dest_match = DEST_RE.search(line)
+            already_match = ALREADY_RE.search(line)
+            merger_match = MERGER_RE.search(line)
+
+            if dest_match:
+                current_title = os.path.basename(dest_match.group(1))
+                last_percent = -1.0
+                with lock:
+                    job_progress[job_id]["title"] = current_title
+                    job_progress[job_id]["percent"] = 0.0
+                continue
+
+            if already_match:
+                current_title = os.path.basename(already_match.group(1))
+                with lock:
+                    job_progress[job_id]["title"] = f"{current_title} (already downloaded)"
+                continue
+
+            if merger_match:
+                with lock:
+                    job_progress[job_id]["title"] = f"merging → {os.path.basename(merger_match.group(1))}"
+                continue
+
+            prog_match = PROGRESS_RE.search(line)
+            if prog_match:
+                percent = float(prog_match.group("percent"))
+                speed = prog_match.group("speed") or "?"
+                eta   = prog_match.group("eta") or "?"
+                with lock:
+                    job_progress[job_id]["percent"] = percent
+                    job_progress[job_id]["speed"] = speed
+                    job_progress[job_id]["eta"] = eta
+                last_percent = percent
+
+        proc.wait()
+
         if proc.returncode == 0:
-            print(f"\n{G}[{ts()}] {label} ✔ DONE{RST}  {DIM}{url}{RST}")
+            moved = move_finished_files(staging_root, download_dir, label)
+            print(
+                f"\n{G}[{ts()}] {label} ✔ DONE{RST}  "
+                f"{DIM}({moved} file(s) moved to {download_dir}){RST}  {DIM}{url}{RST}"
+            )
         else:
-            error_tail = proc.stdout.strip().splitlines()
-            last_lines = "\n    ".join(error_tail[-6:]) if error_tail else "(no output)"
+            last_lines = "\n    ".join(output_lines[-6:]) if output_lines else "(no output)"
             print(
                 f"\n{R}[{ts()}] {label} ✘ FAILED{RST}  {Y}{url}{RST}\n"
                 f"    {DIM}{last_lines}{RST}"
             )
+            # Leave partial files in staging (untouched) so nothing broken
+            # lands in the real folder — only clean up if it's already empty.
+            if os.path.isdir(staging_root) and not os.listdir(staging_root):
+                shutil.rmtree(staging_root, ignore_errors=True)
 
     except FileNotFoundError:
         print(
@@ -114,6 +268,7 @@ def run_download(url: str, job_id: int, playlist_mode: bool):
     finally:
         with lock:
             active_jobs.pop(url, None)
+            job_progress.pop(job_id, None)
         print_status()
         print(f"{DIM}  Enter a URL (or 'q' to quit): {RST}", end="", flush=True)
 
@@ -136,9 +291,11 @@ def spawn_download(url: str):
             return
         job_counter += 1
         jid = job_counter
+        # Snapshot the current mode/dir so this job stays locked to what it
+        # was when the user hit Enter, even if settings change afterwards.
         t = threading.Thread(
             target=run_download,
-            args=(url, jid, PLAYLIST_MODE),
+            args=(url, jid, PLAYLIST_MODE, BYPASS_MODE, DOWNLOAD_DIR),
             daemon=True,
         )
         active_jobs[url] = t
@@ -186,15 +343,19 @@ def toggle_playlist():
     global PLAYLIST_MODE
     PLAYLIST_MODE = not PLAYLIST_MODE
     if PLAYLIST_MODE:
-        print(
-            f"  {G}✔ Playlist mode ON{RST} — full playlists will be downloaded.\n"
-            f"  {DIM}  Each video saved as: playlist-name/video-title.ext{RST}"
-        )
+        print(f"  {G}✔ Playlist mode ON{RST}")
     else:
-        print(
-            f"  {C}✔ Single-video mode ON{RST} — only the individual video is downloaded,\n"
-            f"  {DIM}  even if the URL belongs to a playlist.{RST}"
-        )
+        print(f"  {C}✔ Single-video mode ON{RST}")
+
+
+def toggle_bypass():
+    """Toggle the bypass flags (impersonate chrome, rm-cache, ipv4)."""
+    global BYPASS_MODE
+    BYPASS_MODE = not BYPASS_MODE
+    if BYPASS_MODE:
+        print(f"  {M}✔ Bypass Mode ON{RST} — Using Chrome impersonation and IPv4.")
+    else:
+        print(f"  {DIM}✔ Bypass Mode OFF{RST} — Using standard yt-dlp settings.")
 
 
 def set_cookies():
@@ -229,43 +390,24 @@ def set_cookies():
     if not os.path.isfile(path):
         print(f"  {R}✘ That path is not a file. Cookies unchanged.{RST}")
         return
-    if not path.endswith(".txt"):
-        # warn but still allow it — some people rename their cookies file
-        print(f"  {Y}⚠ Warning: file does not end in .txt — make sure it is a Netscape-format cookies file.{RST}")
 
     COOKIES_FILE = path
-    print(
-        f"  {G}✔ Cookies set: {COOKIES_FILE}{RST}\n"
-        f"  {DIM}  All future downloads will use this cookies file.{RST}\n"
-        f"  {DIM}  Tip: export cookies with the 'Get cookies.txt LOCALLY' extension in Chrome/Firefox.{RST}"
-    )
+    print(f"  {G}✔ Cookies set: {COOKIES_FILE}{RST}")
 
 
 def check_yt_dlp():
-    """Check that yt-dlp is installed. Exit with a helpful message if not."""
+    """Check that yt-dlp is installed."""
     if shutil.which(YT_DLP_BINARY) is None:
-        print(
-            f"\n{R}✘ '{YT_DLP_BINARY}' is not installed or not in your PATH.{RST}\n\n"
-            f"  Install it on Arch Linux with:\n"
-            f"    {Y}sudo pacman -S yt-dlp{RST}\n\n"
-            f"  Or via pip:\n"
-            f"    {Y}pip install yt-dlp{RST}\n"
-        )
+        print(f"\n{R}✘ '{YT_DLP_BINARY}' is not installed.{RST}")
         sys.exit(1)
-
-    # Also grab and show the installed version
     try:
-        result = subprocess.run(
-            [YT_DLP_BINARY, "--version"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        version = result.stdout.strip()
-        print(f"  {DIM}yt-dlp version: {RST}{G}{version}{RST}")
-    except Exception:
-        pass  # version check is cosmetic, don't crash if it fails
+        result = subprocess.run([YT_DLP_BINARY, "--version"], stdout=subprocess.PIPE, text=True)
+        print(f"  {DIM}yt-dlp version: {RST}{G}{result.stdout.strip()}{RST}")
+    except:
+        pass
 
 
-
+def wait_for_all():
     """Block until every running download thread finishes."""
     with lock:
         threads = list(active_jobs.values())
@@ -273,9 +415,35 @@ def check_yt_dlp():
         t.join()
 
 
+def cleanup_staging_root(download_dir: str):
+    """Remove the top-level hidden staging container if it's empty.
+
+    Each job already cleans up its own job_<id> subfolder on success, so by
+    the time all downloads have finished, .activedownloads should just be an
+    empty (or non-existent) directory. This wipes it so no trace is left
+    behind when the script quits.
+    """
+    staging_container = os.path.join(download_dir, STAGING_DIRNAME)
+    if not os.path.isdir(staging_container):
+        return
+    try:
+        # Only remove leftover empty job dirs / the container itself.
+        # Never touch a job dir that still has files in it (shouldn't happen
+        # here since wait_for_all() already joined every thread, but be safe).
+        for entry in os.listdir(staging_container):
+            entry_path = os.path.join(staging_container, entry)
+            if os.path.isdir(entry_path) and not os.listdir(entry_path):
+                os.rmdir(entry_path)
+        if not os.listdir(staging_container):
+            os.rmdir(staging_container)
+    except Exception:
+        pass  # non-critical cleanup — don't block quitting over it
+
+
 def signal_handler(sig, frame):
     print(f"\n{Y}  Interrupted. Waiting for {len(active_jobs)} active download(s) to finish…{RST}")
     wait_for_all()
+    cleanup_staging_root(DOWNLOAD_DIR)
     print(f"{G}  All done. Goodbye.{RST}")
     sys.exit(0)
 
@@ -289,26 +457,28 @@ def main():
 {C}╔══════════════════════════════════════════════╗
 ║       yt-dlp  Concurrent  Download Manager   ║
 ╚══════════════════════════════════════════════╝{RST}
-  {DIM}Downloads go to : {RST}{W}{DOWNLOAD_DIR}{RST}
-  {DIM}Mode             : {RST}{C}SINGLE VIDEO{RST} {DIM}(type {RST}{W}p{RST}{DIM} to switch){RST}
-  {DIM}Cookies          : {RST}{Y}NOT SET{RST} {DIM}(type {RST}{W}c{RST}{DIM} to set){RST}
+  {DIM}Directory : {RST}{W}{DOWNLOAD_DIR}{RST}
+  {DIM}Staging   : {RST}{DIM}{STAGING_DIRNAME}/ (hidden — files move out once finished){RST}
+  {DIM}Mode      : {RST}{C}SINGLE{RST} / {G}PLAYLIST{RST}
+  {DIM}Bypass    : {RST}{M}--impersonate chrome -4{RST}
 """)
 
     check_yt_dlp()
     print()
 
     print(
-        f"  {W}URL{RST}   {DIM}→ start a download in the background{RST}\n"
-        f"  {W}s{RST}     {DIM}→ show active downloads, mode & cookies status{RST}\n"
-        f"  {W}d{RST}     {DIM}→ change output directory{RST}\n"
-        f"  {W}p{RST}     {DIM}→ toggle single-video / playlist mode{RST}\n"
-        f"  {W}c{RST}     {DIM}→ set / clear cookies .txt file (for login-gated sites){RST}\n"
-        f"  {W}q{RST}     {DIM}→ quit (waits for active downloads to finish){RST}\n"
+        f"  {W}URL{RST}   {DIM}→ start download{RST}\n"
+        f"  {W}s{RST}     {DIM}→ status check{RST}\n"
+        f"  {W}b{RST}     {DIM}→ toggle BYPASS mode (for blocked videos){RST}\n"
+        f"  {W}p{RST}     {DIM}→ toggle playlist mode{RST}\n"
+        f"  {W}d{RST}     {DIM}→ change directory{RST}\n"
+        f"  {W}c{RST}     {DIM}→ set cookies{RST}\n"
+        f"  {W}q{RST}     {DIM}→ quit{RST}\n"
     )
 
     while True:
         try:
-            raw = input(f"{DIM}  Enter a URL (or 'q' to quit): {RST}").strip()
+            raw = input(f"{DIM}  Enter a URL (or command): {RST}").strip()
         except EOFError:
             break
 
@@ -317,21 +487,19 @@ def main():
         if cmd in {"q", "quit", "exit"}:
             print(f"{Y}  Quitting — waiting for active downloads to finish…{RST}")
             wait_for_all()
+            cleanup_staging_root(DOWNLOAD_DIR)
             print(f"{G}  All done. Goodbye.{RST}")
             break
-
         elif cmd == "s":
-            print_status()
-
+            print_status(show_progress=True)
+        elif cmd == "b":
+            toggle_bypass()
         elif cmd == "d":
             change_directory()
-
         elif cmd == "p":
             toggle_playlist()
-
         elif cmd == "c":
             set_cookies()
-
         else:
             spawn_download(raw)
 

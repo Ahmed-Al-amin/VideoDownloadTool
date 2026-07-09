@@ -1,91 +1,97 @@
 # Usage Guide — yt-dlp Concurrent Download Manager
 
-This guide walks through every command and behavior of `yt_dlp_manager.py` in detail.
+This guide walks through every command, configuration, and background behavior of `yt_dlp_manager.py` in detail.
+
+---
 
 ## 1. Starting the tool
+
+Ensure you have Python 3.10+ and `yt-dlp` installed (along with `ffmpeg` for post-processing, thumbnail embedding, and metadata).
 
 ```bash
 python yt_dlp_manager.py
 ```
 
-On startup the tool will:
-1. Create the download directory (`~/Downloads/yt-dlp` by default) if it doesn't already exist
-2. Register a `Ctrl+C` handler so an interrupt waits for active downloads instead of killing them
-3. Check that `yt-dlp` is installed and print its version
-4. Show the command menu and drop you into an interactive prompt
+On startup, the tool will:
+1. Verify that `yt-dlp` is installed and print the current version.
+2. Register a graceful `Ctrl+C` / signal handler so interrupts wait for active downloads instead of creating corrupted partial files.
+3. Display the configuration and command menus.
+4. Drop you into an interactive command prompt.
 
-If `yt-dlp` is not found on your `PATH`, the tool will exit and print install instructions.
+If `yt-dlp` is not found on your system `PATH`, the tool will display helpful install instructions and exit with status code `1`.
+
+---
 
 ## 2. The interactive prompt
 
 Once running, you'll see:
 
 ```
-Enter a URL (or 'q' to quit):
+Enter a URL (or command):
 ```
 
-From here you can either:
-- **Paste a URL** to start a download, or
-- **Type a single-letter command** (see below)
+From here, you can:
+- **Paste a URL** to start a download thread in the background.
+- **Type a single-letter command** (see below).
+
+---
 
 ## 3. Commands
 
-| Command | Action |
+| Key | Action |
 |---|---|
-| *(paste a URL)* | Starts a new download in the background |
-| `s` | Show status — number of active downloads, current mode, and cookies status |
-| `d` | Change the output directory |
-| `p` | Toggle between single-video mode and playlist mode |
-| `c` | Set or clear the cookies file |
-| `q` / `quit` / `exit` | Quit — waits for all active downloads to finish first |
+| `<URL>` | Starts a new download in the background (threads are managed concurrently) |
+| `s` | Status check — displays a snapshot of active jobs with live progress percentage, speed, ETA, and video titles |
+| `b` | Toggle **bypass mode** (enables Chrome impersonation, cache deletion, and IPv4 force) |
+| `p` | Toggle **playlist mode** (single video download vs full playlist) |
+| `d` | Change the download directory |
+| `c` | Set or clear the Netscape cookies file |
+| `q` / `quit` / `exit` | Quit — waits for all active downloads to finish cleanly before exiting |
 
 ### Starting a download
 
 Simply paste any `http://` or `https://` URL and press Enter:
 
 ```
-Enter a URL (or 'q' to quit): https://www.youtube.com/watch?v=example
+Enter a URL (or command): https://www.youtube.com/watch?v=example
 ```
 
-The download starts immediately in its own thread, and you're returned to the prompt right away so you can queue more URLs. Each job gets a job number (`#1`, `#2`, ...) shown in the output so you can track it.
+The download starts immediately in its own background daemon thread. You are returned to the prompt instantly so you can queue more URLs. Each job receives a job number (`#1`, `#2`, ...) shown in the output to help you track it.
 
-**Notes:**
-- URLs must start with `http://` or `https://` — anything else is rejected
-- You can't start the same URL twice while it's already downloading (it will be skipped)
-- There's no hard limit on concurrent downloads — every valid URL you enter spawns a new thread
+**Important details:**
+- URLs must start with `http://` or `https://` — invalid paths are rejected with a warning.
+- Duplicate downloads of the same URL currently in progress are prevented.
+- There is no hard-coded limit on concurrent downloads.
 
-### Checking status (`s`)
+### Checking status with live progress (`s`)
 
-Shows something like:
+Typing `s` displays a live, structured overview of all active downloads, including their current progress, download speed, remaining time, and titles.
 
+**Example output:**
 ```
-[14:32:10] Active downloads: 2  Mode: SINGLE VIDEO  Cookies: NOT SET
-```
-
-or, if idle:
-
-```
-[14:32:10] No active downloads.  Mode: PLAYLIST  Cookies: SET (/home/user/cookies.txt)
+  [12:04:15] Active: 2  Mode: SINGLE VIDEO  Bypass: OFF  Cookies: NOT SET
+    #1   42.3%  3.2MiB/s ETA 00:14  Some Awesome Video.mp4
+    #2    8.7%  1.1MiB/s ETA 02:45  Another Great Clip.mp4
 ```
 
-### Changing the output directory (`d`)
-
+If there are no running downloads, it prints:
 ```
-Enter a URL (or 'q' to quit): d
-Current directory: /home/user/Downloads/yt-dlp
-New directory path: /home/user/Videos
+  [12:04:30] Active: 0  Mode: SINGLE VIDEO  Bypass: OFF  Cookies: NOT SET
 ```
 
-- `~` is expanded automatically (e.g. `~/Videos` works)
-- If the directory doesn't exist, it's created for you
-- If the path exists but is a file (not a folder), the change is rejected
-- **Only affects downloads started after the change** — anything already running keeps using the old path
+### Toggling bypass mode (`b`)
+
+If a video is geo-blocked, restricted, or failing due to bot-detection/rate-limiting, press `b` to toggle **Bypass Mode**.
+
+- **When ON:** Adds `--impersonate chrome`, `--rm-cache-dir`, and `-4` (forces IPv4) to the `yt-dlp` subprocess.
+- **When OFF:** Uses standard `yt-dlp` arguments.
+- Mode changes only apply to *new* downloads queued after the toggle.
 
 ### Toggling playlist mode (`p`)
 
-By default the tool is in **single-video mode**: even if you paste a playlist URL, only that one video downloads.
+By default, the tool is in **single-video mode**: even if you paste a playlist URL, only that specific video is downloaded.
 
-Typing `p` switches to **playlist mode**, where pasting a playlist URL downloads every video in it, saved into its own subfolder named after the playlist:
+Typing `p` switches to **playlist mode**: pasting a playlist URL downloads every video in the playlist, organizing them into a subdirectory named after the playlist:
 
 ```
 <download_dir>/<playlist name>/<video title>.<ext>
@@ -97,77 +103,123 @@ In single-video mode, files are saved flat:
 <download_dir>/<video title>.<ext>
 ```
 
-Typing `p` again switches back. The current mode is always shown in the `s` status output.
+Press `p` again to switch back. The current mode is displayed on the `s` status line.
+
+### Changing the download directory (`d`)
+
+```
+Enter a URL (or command): d
+Current directory: /home/user/Downloads/yt-dlp
+New directory path: ~/Videos
+  ✔ Directory updated to: /home/user/Videos
+```
+
+- `~` is automatically expanded to your home directory (e.g., `/home/user`).
+- If the directory doesn't exist, it is created automatically.
+- Path changes only affect downloads started *after* the change. Existing active jobs continue downloading to their original destination.
 
 ### Setting or clearing cookies (`c`)
 
-Useful for downloading content that requires you to be logged in (age-restricted videos, private/unlisted content, members-only content, etc.).
+Required for downloading private, age-restricted, login-gated, or subscriber-only content.
 
 ```
-Enter a URL (or 'q' to quit): c
+Enter a URL (or command): c
 No cookies file set.
 Enter path to cookies .txt file: ~/cookies.txt
+  ✔ Cookies set: /home/user/cookies.txt
 ```
 
-- The file must exist and be a regular file
-- It should be in **Netscape cookie format** — you'll get a warning (not a hard failure) if the filename doesn't end in `.txt`
-- **Tip:** export cookies using a browser extension such as "Get cookies.txt LOCALLY" for Chrome/Firefox
-
-To **clear** an already-set cookies file, run `c` again and press Enter without typing a path:
+- The cookies file must be in Netscape cookies format (usually exported via browser extensions like "Get cookies.txt LOCALLY" on Chrome/Firefox).
+- To clear an existing cookies file, run `c` again and press Enter without typing a path:
 
 ```
-Enter a URL (or 'q' to quit): c
+Enter a URL (or command): c
 Current cookies file: /home/user/cookies.txt
-Enter new path, or press Enter to CLEAR cookies:
+Enter new path, or press Enter to CLEAR cookies: 
+  ✔ Cookies cleared.
 ```
 
 ### Quitting (`q`)
 
+Typing `q` (or hitting `Ctrl+C`) initiates a graceful exit:
+
 ```
-Enter a URL (or 'q' to quit): q
-Quitting — waiting for active downloads to finish…
+Enter a URL (or command): q
+  Quitting — waiting for active downloads to finish…
 ```
 
-The tool will **not** exit until every active download thread completes. Pressing `Ctrl+C` does the same thing — it will not abandon in-progress downloads.
+The application will block until all background downloads are fully completed and moved out of staging. It then deletes any empty staging folders and exits cleanly.
 
-## 4. Reading the output
+---
 
-Each download prints colored status lines as it progresses:
+## 4. The Safe Staging System
 
-- 🟢 `STARTED` — job began, shows job number and URL
-- 🟢 `✔ DONE` — finished successfully
-- 🔴 `✘ FAILED` — yt-dlp returned a non-zero exit code; the last few lines of yt-dlp's output are printed to help diagnose the issue
-- 🔴 `✘ ERROR` — the `yt-dlp` binary itself couldn't be found
-- 🔴 `✘ EXCEPTION` — an unexpected Python error occurred while running the job
+To support safe concurrent downloads, the tool employs an isolated staging workflow:
 
-Because downloads run in background threads, output from multiple jobs can interleave — look for the job number (`#1`, `#2`, ...) and URL to tell them apart.
+1. **Staging Folder:** Each download job is assigned a unique, hidden folder inside your download directory: `.activedownloads/job_<id>`.
+2. **Isolation:** Files are downloaded, merged, and post-processed (adding metadata and embedding thumbnails) inside this hidden folder. Concurrent downloads never collide or overwrite each other.
+3. **Move-on-Success:** Once `yt-dlp` completes successfully and terminates with code `0`, the finished files are moved atomically to the final download folder (preserving playlist directories if in playlist mode), and the staging directory for that job is wiped.
+4. **No Half-Finished Files:** If a download fails or is terminated, the partial files are **left untouched** inside the hidden staging folder. This prevents corrupted, half-downloaded, or unmerged `.part` and `.temp` files from cluttering your actual download folder.
+5. **Cleanup:** When the script exits, empty staging directories are completely cleaned up.
 
-## 5. Download settings that apply to every job
+---
 
-Every download uses these fixed yt-dlp flags:
+## 5. Reading the Output & Color Legend
 
-- `--embed-thumbnail` — embeds the video's thumbnail into the file
-- `--add-metadata` — embeds title/description/etc. metadata
-- `-f bestvideo+bestaudio/best` — picks the best available video and audio streams and merges them (falls back to best combined stream if separate streams aren't available)
+The CLI utilizes clean ANSI escape colors to make terminal status readable at a glance:
 
-Plus, dynamically:
-- `--no-playlist` (only in single-video mode)
-- `--cookies <path>` (only if a cookies file is set)
-- `-o <output template>` — based on current directory and mode
-
-**Important:** each download "snapshots" the current directory, mode, and cookies settings at the moment it *starts*. If you change settings while a download is already running, that running download keeps its original settings — only new downloads pick up the change.
-
-## 6. Troubleshooting
-
-| Problem | Likely cause / fix |
+| Color | Meaning |
 |---|---|
-| Tool exits immediately with an install message | `yt-dlp` isn't installed or isn't on your `PATH` — see the [README](README.md) for install instructions |
-| Download fails right away | Check the printed error tail; often means the URL is invalid, geo-blocked, or requires cookies |
-| Age-restricted / login-required content fails | Set a cookies file with `c` |
-| "Already downloading that URL. Skipped." | You pasted a URL that's already an active job — wait for it to finish or check with `s` |
-| Playlist only downloads one video | You're in single-video mode — press `p` to switch to playlist mode |
-| Files saved to the wrong place | Remember directory changes only apply to downloads started *after* the change |
+| 🟢 **Green** | Success, job completion, or a feature/setting turned ON |
+| 🔴 **Red** | Failures, missing dependencies, or errors |
+| 🟡 **Yellow** | Warning, invalid input, duplicate URLs, or settings turned OFF |
+| 🔵 **Blue** | Visual dividers, frame borders, and structural styling |
+| 🩵 **Cyan** | Job IDs, single-video mode status, and prompt highlights |
+| 🟣 **Magenta** | Bypass mode highlights and parameters |
+| ⚪ **White** | Filenames and video titles |
+| ░ **Dim** | Contextual metadata, timestamps, and helpful tips |
 
-## 7. Exiting safely
+Each background event prints a labeled message with its job ID and a timestamp:
 
-Always prefer `q` or `Ctrl+C` over force-killing the terminal — both wait for active downloads to finish cleanly, avoiding partially-downloaded or corrupted files.
+- `[12:04:11] #1 STARTED [SINGLE] https://...`
+- `[12:04:38] #1 ✔ DONE (1 file(s) moved to ~/Downloads/yt-dlp)`
+- `[12:05:01] #2 ✘ FAILED https://...` (followed by the last 6 lines of `yt-dlp` output to diagnose the issue)
+
+---
+
+## 6. Download settings (Subprocess Parameters)
+
+Every job is executed via Python's standard library `subprocess` with these foundational parameters:
+
+- `--embed-thumbnail` — Embeds the video's thumbnail cover art directly into the file.
+- `--add-metadata` — Embeds description, uploader, title, and upload date.
+- `-f bestvideo+bestaudio/best` — Picks the highest quality video and audio streams and merges them (requires `ffmpeg`).
+- `--newline` — Standardizes output logging to simplify live progress parsing.
+
+Additional dynamic flags:
+- `--no-playlist` (passed when in single-video mode).
+- `--cookies <path>` (passed if cookies are set).
+- `--impersonate chrome --rm-cache-dir -4` (passed if bypass mode is ON).
+- `-o <output_template>` (maps the files directly into `.activedownloads/job_<id>`).
+
+---
+
+## 7. Troubleshooting
+
+| Problem | Cause / Solution |
+|---|---|
+| **`'yt-dlp' is not installed`** | Ensure `yt-dlp` is installed and added to your system `PATH`. Check with `which yt-dlp` or `yt-dlp --version`. |
+| **`ffmpeg` warnings or format merge errors** | Ensure `ffmpeg` is installed. It's required by `yt-dlp` to merge high-quality video and audio tracks, embed thumbnails, and write metadata. |
+| **Video blocked, bot detected, or HTTP 403 / 400 errors** | Press `b` to toggle **Bypass Mode**. If that fails, export a Netscape format `cookies.txt` file and set it with `c`. |
+| **Download fails immediately** | Press `s` to inspect the status, or read the trailing logs printed directly after the `✘ FAILED` error message. |
+| **Duplicate download skips** | The tool blocks simultaneous downloads of identical URLs to save bandwidth. Wait for the active job to finish or check progress with `s`. |
+| **Playlist downloads only one video** | The tool is running in single-video mode. Press `p` to toggle **Playlist Mode** ON. |
+
+---
+
+## 8. Exiting Safely
+
+Always quit using `q` or `Ctrl+C`. This ensures:
+1. In-progress threads are allowed to finish writing and packaging their streams cleanly.
+2. `ffmpeg` completes any active formatting and metadata embedding, preventing corrupt files.
+3. Any unused empty staging subdirectories under `.activedownloads` are cleaned up.
