@@ -192,6 +192,12 @@ YT_DLP_BASE_ARGS = [
 
 ---
 
+## 👤 Contributor
+
+- [Ahmed Al-amin](https://github.com/Ahmed-Al-amin)
+
+---
+
 ## 🤝 Contributing
 
 Issues and pull requests are welcome! If you run into a bug or have an idea for a feature, feel free to open an issue on the [repo](https://github.com/Ahmed-Al-amin/VideoDownloadTool).
