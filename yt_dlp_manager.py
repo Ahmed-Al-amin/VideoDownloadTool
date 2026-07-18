@@ -52,6 +52,23 @@ PROGRESS_RE   = re.compile(
 )
 MERGER_RE     = re.compile(r'\[Merger\]\s+Merging formats into "(.+)"')
 
+# Matches postprocessing failures that happen *after* the actual media file
+# is already fully downloaded/merged (thumbnail embedding, metadata tagging).
+# These are safe to treat as "video is fine, just missing the extra" rather
+# than a real download failure.
+POSTPROC_SOFT_FAIL_RE = re.compile(
+    r'ERROR:\s*Postprocessing.*(?:Unable to embed|Conversion failed|embed.*thumbnail)',
+    re.IGNORECASE,
+)
+
+# Extensions we consider "the actual downloaded media" — anything else left
+# behind in a job's staging folder (thumbnails, .part files, json, etc.) is
+# considered auxiliary junk and gets deleted rather than moved.
+MEDIA_EXTS = {
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv",   # video containers
+    ".mp3", ".m4a", ".flac", ".wav", ".opus", ".ogg", ".aac",  # audio-only
+}
+
 
 def build_args(job_id: int, playlist_mode: bool, bypass_mode: bool, download_dir: str):
     """Return (yt-dlp args, staging_root) for this job.
@@ -82,12 +99,35 @@ def build_args(job_id: int, playlist_mode: bool, bypass_mode: bool, download_dir
     return args, staging_root
 
 
+def purge_auxiliary_files(staging_root: str, label: str) -> int:
+    """Delete every file in the staging tree that isn't a recognized media
+    file (leftover thumbnails, .part/.ytdl fragments, .info.json, etc.).
+    Called before moving, so only the actual video/audio ends up in the
+    real download folder. Returns the number of files deleted."""
+    deleted = 0
+    for root, _dirs, files in os.walk(staging_root):
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in MEDIA_EXTS:
+                continue
+            path = os.path.join(root, fname)
+            try:
+                os.remove(path)
+                deleted += 1
+            except Exception as exc:
+                print(f"  {R}⚠ {label} could not delete leftover '{fname}': {exc}{RST}")
+    return deleted
+
+
 def move_finished_files(staging_root: str, download_dir: str, label: str) -> int:
-    """Move every fully-downloaded file out of the hidden staging folder into
-    the real download folder, preserving playlist subfolder structure.
+    """Purge non-media leftovers, then move every remaining (fully-downloaded
+    media) file out of the hidden staging folder into the real download
+    folder, preserving playlist subfolder structure.
     Returns the number of files moved."""
     if not os.path.isdir(staging_root):
         return 0
+
+    purge_auxiliary_files(staging_root, label)
 
     moved = 0
     for root, _dirs, files in os.walk(staging_root):
@@ -185,6 +225,7 @@ def run_download(url: str, job_id: int, playlist_mode: bool, bypass_mode: bool, 
     output_lines: list[str] = []
     current_title = url
     last_percent  = -1.0
+    postproc_soft_fail = False   # set True if only thumbnail/metadata embedding failed
 
     with lock:
         job_progress[job_id] = {"title": url, "percent": None, "speed": None, "eta": None, "url": url}
@@ -207,6 +248,9 @@ def run_download(url: str, job_id: int, playlist_mode: bool, bypass_mode: bool, 
             dest_match = DEST_RE.search(line)
             already_match = ALREADY_RE.search(line)
             merger_match = MERGER_RE.search(line)
+
+            if POSTPROC_SOFT_FAIL_RE.search(line):
+                postproc_soft_fail = True
 
             if dest_match:
                 current_title = os.path.basename(dest_match.group(1))
@@ -244,6 +288,15 @@ def run_download(url: str, job_id: int, playlist_mode: bool, bypass_mode: bool, 
             moved = move_finished_files(staging_root, download_dir, label)
             print(
                 f"\n{G}[{ts()}] {label} ✔ DONE{RST}  "
+                f"{DIM}({moved} file(s) moved to {download_dir}){RST}  {DIM}{url}{RST}"
+            )
+        elif proc.returncode != 0 and postproc_soft_fail:
+            # The actual video/audio finished fine — only thumbnail/metadata
+            # embedding failed afterwards. Strip the leftover junk and move
+            # the real media file through anyway.
+            moved = move_finished_files(staging_root, download_dir, label)
+            print(
+                f"\n{Y}[{ts()}] {label} ✔ DONE (thumbnail/metadata embed failed, video kept){RST}  "
                 f"{DIM}({moved} file(s) moved to {download_dir}){RST}  {DIM}{url}{RST}"
             )
         else:

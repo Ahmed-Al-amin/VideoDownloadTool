@@ -170,6 +170,7 @@ To support safe concurrent downloads, the tool employs an isolated staging workf
 3. **Move-on-Success:** Once `yt-dlp` completes successfully and terminates with code `0`, the finished files are moved atomically to the final download folder (preserving playlist directories if in playlist mode), and the staging directory for that job is wiped.
 4. **No Half-Finished Files:** If a download fails or is terminated, the partial files are **left untouched** inside the hidden staging folder. This prevents corrupted, half-downloaded, or unmerged `.part` and `.temp` files from cluttering your actual download folder.
 5. **Cleanup:** When the script exits, empty staging directories are completely cleaned up.
+6. **Auxiliary File Purge & Soft-Fail Recovery:** Before moving files out of staging, any non-media leftover files (such as orphaned thumbnails, `.part`/`.ytdl` fragments, `.info.json` etc.) are automatically purged, ensuring only the actual video/audio media files end up in your download folder. Furthermore, if `yt-dlp` returns a non-zero exit code but the actual media finished downloading fine — failing only on subsequent thumbnail or metadata post-processing — the tool treats this as a "soft-fail" rather than a hard failure. It purges the staging junk, saves the downloaded media file to the destination folder, and reports a status of `✔ DONE (thumbnail/metadata embed failed, video kept)` instead of failing.
 
 ---
 
@@ -193,6 +194,7 @@ Each background event prints a labeled message with its job ID and a timestamp:
 - `[12:04:11] #1 STARTED [SINGLE] https://...`
 - `[12:04:38] #1 ✔ DONE (1 file(s) moved to ~/Downloads/yt-dlp)`
 - `[12:05:01] #2 ✘ FAILED https://...` (followed by the last 6 lines of `yt-dlp` output to diagnose the issue)
+- `[12:05:05] #3 ✔ DONE (thumbnail/metadata embed failed, video kept) (1 file(s) moved to ~/Downloads/yt-dlp)` (printed when a soft-fail post-processing error occurs but the video/audio is preserved)
 
 ---
 
@@ -223,6 +225,7 @@ Additional dynamic flags:
 | **Download fails immediately** | Press `s` to inspect the status, or read the trailing logs printed directly after the `✘ FAILED` error message. |
 | **Duplicate download skips** | The tool blocks simultaneous downloads of identical URLs to save bandwidth. Wait for the active job to finish or check progress with `s`. |
 | **Playlist downloads only one video** | The tool is running in single-video mode. Press `p` to toggle **Playlist Mode** ON. |
+| **Post-processing/thumbnail embedding fails** | If the media is fully downloaded but post-processing fails, the tool handles it as a soft-fail, purges staging leftovers, and keeps the media file. |
 
 ---
 

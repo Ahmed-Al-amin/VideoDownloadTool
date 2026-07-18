@@ -36,6 +36,7 @@ It was built for Arch Linux but works anywhere `yt-dlp` and Python 3.10+ are ava
 | 📂 **Custom download directory** | Change your output folder at any time without restarting. |
 | 🧹 **Auto cleanup** | Empty staging folders are wiped on exit; failed downloads leave no partial files behind in your real folder. |
 | ⌨️ **Graceful Ctrl+C** | Interrupting the script waits for active downloads to finish before exiting cleanly. |
+| 🛡️ **Soft-fail recovery** | If thumbnail/metadata embedding fails but the media is fully downloaded, the tool recovers gracefully, purges auxiliary leftovers, and preserves the media file instead of failing. |
 
 ---
 
@@ -172,6 +173,7 @@ YT_DLP_BASE_ARGS = [
 4. On success, finished files are **moved** from staging into the real download folder (preserving playlist subfolders), and the staging folder is removed.
 5. On failure, partial files are **left untouched** in staging so nothing broken ever lands in your real folder.
 6. `Ctrl+C` triggers a graceful shutdown: it waits for all active downloads to finish, cleans up staging, then exits.
+7. **Post-processing Soft-Fail Recovery:** If a download completes successfully but post-processing (such as thumbnail embedding or metadata tagging) fails, the tool recovers gracefully. It purges any non-media leftover files (like orphaned thumbnails/jsons) from staging, saves the main media file anyway, and reports the partial success instead of treating the entire download as failed.
 
 ---
 
@@ -180,9 +182,10 @@ YT_DLP_BASE_ARGS = [
 | Problem | Fix |
 |---|---|
 | `'yt-dlp' is not installed` | Install it with `sudo pacman -S yt-dlp` (Arch) or `pip install -U yt-dlp`. |
-| Video blocked / detected as bot | Press `b` to toggle **bypass mode**. |
+| Video blocked / detected as bot | Press `b` to toggle **Bypass Mode**. |
 | Age-restricted / login-required video | Press `c` and provide a `cookies.txt` file exported from your browser. |
 | Download fails immediately | Press `s` to check status, or review the last output lines printed after a `✘ FAILED` message. |
+| Post-processing or thumbnail embedding fails | If the actual video/audio downloads successfully but embedding fails, the tool automatically purges leftovers and keeps the downloaded media. |
 
 ---
 
